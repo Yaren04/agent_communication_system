@@ -1,6 +1,6 @@
 """
 Otonom Yazılım Geliştirme Ekibi
-CrewAI + Google Gemini 1.5 Pro
+CrewAI + Google Gemini 2.5 Flash
 
 Mimari:
   Sistem Mimarı → Geliştirici → QA Uzmanı ⇄ Performans Mimarı
@@ -13,14 +13,13 @@ import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
-from crewai import Agent, Task, Crew, Process
+from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LLM — Google Gemini 1.5 Pro
+# LLM — Google Gemini 2.5 Flash
 # ─────────────────────────────────────────────────────────────────────────────
 _api_key = os.environ.get("GOOGLE_API_KEY")
 if not _api_key:
@@ -30,11 +29,9 @@ if not _api_key:
         "ve geçerli API anahtarınızı girin."
     )
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-pro",
-    google_api_key=_api_key,
-    temperature=0.7,
-    convert_system_message_to_human=True,
+gemini_llm = LLM(
+    model="gemini/gemini-2.5-flash",
+    api_key=_api_key,
 )
 
 
@@ -99,6 +96,24 @@ def docker_execute_python_tool(code: str) -> str:
             script_path.unlink(missing_ok=True)
 
 
+@tool("CodeWriterTool")
+def code_writer_tool(code: str, filename: str) -> str:
+    """
+    Verilen Python kodunu, belirtilen dosya adıyla diske kalıcı bir .py dosyası olarak yazar.
+    Dosya zaten varsa üzerine yazılır. Başarı durumunda dosyanın tam (absolute) yolunu döndürür.
+    """
+    if not filename.endswith(".py"):
+        filename = f"{filename}.py"
+
+    target_path = Path(os.getcwd()) / filename
+
+    try:
+        target_path.write_text(code, encoding="utf-8")
+        return f"Kod başarıyla kaydedildi: {target_path.resolve()}"
+    except Exception as exc:
+        return f"HATA: Dosya yazılırken sorun oluştu: {type(exc).__name__}: {exc}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AGENTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,7 +130,7 @@ system_architect = Agent(
         "Planların daima açık, ölçülebilir ve doğrudan uygulanabilir olur; "
         "gereksiz kütüphane bağımlılıklarından özenle kaçınırsın."
     ),
-    llm=llm,
+    llm=gemini_llm,
     max_iter=10,
     verbose=True,
     allow_delegation=False,
@@ -135,10 +150,11 @@ developer = Agent(
         "Standart kütüphaneleri tercih eder, pathlib, shutil ve random modüllerine hakimsin. "
         "Gereksiz yorum satırları ve açıklama yazmak yerine, kendi kendini belgeleyen kod yazarsın."
     ),
-    llm=llm,
+    llm=gemini_llm,
     max_iter=10,
     verbose=True,
     allow_delegation=False,
+    tools=[code_writer_tool],
 )
 
 qa_engineer = Agent(
@@ -154,7 +170,7 @@ qa_engineer = Agent(
         "hatanın tam açıklamasıyla birlikte Geliştiriciye iade edersin. "
         "Kod kusursuz çalıştığında — ve yalnızca o zaman — onayı verirsin."
     ),
-    llm=llm,
+    llm=gemini_llm,
     max_iter=10,
     verbose=True,
     allow_delegation=True,
@@ -177,10 +193,11 @@ performance_architect = Agent(
         "Önerilerini her zaman somut ve uygulanabilir biçimde sunar, "
         "gereksiz karmaşıklıktan kaçınırsın."
     ),
-    llm=llm,
+    llm=gemini_llm,
     max_iter=10,
     verbose=True,
     allow_delegation=True,
+    tools=[code_writer_tool],
 )
 
 
@@ -249,11 +266,17 @@ KOD KURALLARI:
     * Çıktıyı ekrana yazdır
     * temp_dataset/ ve output/ klasörlerini temizle (shutil.rmtree)
 
-ÇIKTI FORMATI: Yalnızca Python kodu. Markdown blok işareti, açıklama veya başlık YOK.
+DOSYAYA KAYDETME:
+Kodu yazdıktan sonra CodeWriterTool'u kullanarak bu koda uygun, açıklayıcı bir dosya adı seç
+(örn. "dataset_splitter.py") ve kodu bu isimle diske kaydet. Görev çıktında hem tam Python
+kodunu hem de CodeWriterTool'dan dönen kaydedilen dosya yolunu belirt.
+
+ÇIKTI FORMATI: Python kodu ve ardından kaydedilen dosya yolu bilgisi. Markdown blok işareti
+veya gereksiz açıklama YOK.
 """,
     expected_output=(
-        "Tek başına çalışabilen, kendi test ortamını kurup temizleyen tam Python kodu. "
-        "Hiçbir üçüncü taraf bağımlılığı içermemeli."
+        "Tek başına çalışabilen, kendi test ortamını kurup temizleyen tam Python kodu, "
+        "ardından CodeWriterTool ile kaydedilen dosyanın tam yolu."
     ),
     agent=developer,
     context=[architecture_task],
@@ -317,11 +340,17 @@ KARAR:
   - Bir veya daha fazla ❌ varsa → Geliştiriciye somut kod önerileriyle devret
   - Tüm kriterler ✅ veya ⚠️ ise → "✅ PERFORMANS ONAYI VERİLDİ" ile bitir
 
-Raporun sonuna nihai, onaylanmış Python kodunu ekle.
+DOSYAYA KAYDETME:
+Nihai onaylanmış/optimize kodu CodeWriterTool ile Geliştiricinin önceki adımda kaydettiği
+dosyanın AYNI ADIYLA tekrar kaydet (üzerine yazılacak şekilde). Böylece diskteki dosya her
+zaman en güncel, onaylanmış kodu içerir.
+
+Raporun sonuna nihai, onaylanmış Python kodunu ve CodeWriterTool'dan dönen dosya yolunu ekle.
 """,
     expected_output=(
         "Dört kriterli performans analiz raporu: her kriter için sembol ve gerekçe, "
-        "varsa somut optimizasyon önerileri ve raporun sonunda nihai onaylanmış Python kodu."
+        "varsa somut optimizasyon önerileri, raporun sonunda nihai onaylanmış Python kodu "
+        "ve CodeWriterTool ile kaydedilen dosyanın tam yolu."
     ),
     agent=performance_architect,
     context=[qa_task],
@@ -346,7 +375,7 @@ if __name__ == "__main__":
     bar = "=" * 65
     print(f"\n{bar}")
     print("  OTONOM YAZILIM GELİŞTİRME EKİBİ")
-    print("  CrewAI  ·  Google Gemini 1.5 Pro  ·  Docker Sandbox")
+    print("  CrewAI  ·  Google Gemini 2.5 Flash  ·  Docker Sandbox")
     print(f"{bar}\n")
 
     result = crew.kickoff()
