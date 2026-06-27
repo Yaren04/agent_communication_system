@@ -353,7 +353,7 @@ Raporun sonuna nihai, onaylanmış Python kodunu ve CodeWriterTool'dan dönen do
         "ve CodeWriterTool ile kaydedilen dosyanın tam yolu."
     ),
     agent=performance_architect,
-    context=[qa_task],
+    context=[development_task, qa_task],
 )
 
 
